@@ -39,57 +39,61 @@ from vision_transformer import DINOHead
 
 import zipfile
 from torch.utils.data import Dataset
+import shutil
 
 
 #Class ZipDataset added by Juan. it handles files from zips to deal with #files exceeded quota. 
 class ZipDataset(Dataset):
-    def __init__(self, zip_file_path, transform=None):
+    def __init__(self, zip_file_path, temp_dir, transform=None):
         print("@@@WE ARE IN INIT")
         """
         zip_file_path: Path to a single ZIP file.
+        temp_dir: Temporary directory to store unzipped files.
         transform: Transformations to apply to the images.
         """
-        self.zip_file_path = zip_file_path
+        self.temp_dir = temp_dir
         self.transform = transform
+        self._unzip_files(zip_file_path)
         self.samples = self._make_dataset()
         print("@@@WE ARE IN INIT")
-        
+
+    def _unzip_files(self, zip_file_path):
+        """ Unzips the ZIP file into a temporary directory. """
+        print("@@@WE ARE IN UNZIP_FILES")
+        with zipfile.ZipFile(zip_file_path, 'r') as zipf:
+            zipf.extractall(self.temp_dir)
+
     def _make_dataset(self):
-        """
-        Creates a list of samples (image file path, class index) from a single ZIP file.
-        """
+        """ Creates a list of samples (image file path, class index) from the temporary directory. """
         print("@@@WE ARE IN MAKE_DATASET")
         instances = []
-        with zipfile.ZipFile(self.zip_file_path, 'r') as zipf:
-            for fname in zipf.namelist():
+        for root, _, files in os.walk(self.temp_dir):
+            for fname in files:
                 if fname.endswith('.png'):
-                    item = (self.zip_file_path, fname, 0)  # Assuming a single class or class label is not important
+                    item = (os.path.join(root, fname), 0)  # Assuming a single class or class label is not important
                     instances.append(item)
                     if len(instances) % 100000 == 0:
                         print(len(instances))
-
         return instances
 
     def __getitem__(self, index):
-        """
-        Args:
-            index (int): Index
-        Returns:
-            tuple: (image, target) where target is class_index of the target class.
-        """
-        zip_path, fname, target = self.samples[index]
-        with zipfile.ZipFile(zip_path, 'r') as zipf:
-            with zipf.open(fname) as imgf:
-                img = Image.open(imgf)
-                img = img.convert('RGB')
-
-        if self.transform is not None:
+        """ Fetches and transforms an image from the dataset. """
+        print("@@@WE ARE IN GETITEM")
+        img_path, target = self.samples[index]
+        img = Image.open(img_path).convert('RGB')
+        if self.transform:
             img = self.transform(img)
-
         return img, target
 
     def __len__(self):
+        """ Returns the number of samples in the dataset. """
+        print("@@@WE ARE IN LEN")
         return len(self.samples)
+
+    def cleanup(self):
+        """ Removes the temporary directory and its contents. """
+        print("@@@WE ARE IN CLEANUP")
+        shutil.rmtree(self.temp_dir)
 
 
 
@@ -148,14 +152,14 @@ def get_args_parser():
         help optimization for larger ViT architectures. 0 for disabling.""")
     parser.add_argument('--batch_size_per_gpu', default=64, type=int,
         help='Per-GPU batch-size : number of distinct images loaded on one GPU.')
-    parser.add_argument('--epochs', default=100, type=int, help='Number of epochs of training.')
+    parser.add_argument('--epochs', default=20, type=int, help='Number of epochs of training.')
     parser.add_argument('--freeze_last_layer', default=1, type=int, help="""Number of epochs
         during which we keep the output layer fixed. Typically doing so during
         the first epoch helps training. Try increasing this value if the loss does not decrease.""")
     parser.add_argument("--lr", default=0.0005, type=float, help="""Learning rate at the end of
         linear warmup (highest LR used during training). The learning rate is linearly scaled
         with the batch size, and specified here for a reference batch size of 256.""")
-    parser.add_argument("--warmup_epochs", default=10, type=int,
+    parser.add_argument("--warmup_epochs", default=0, type=int,
         help="Number of epochs for the linear learning-rate warm up.")
     parser.add_argument('--min_lr', type=float, default=1e-6, help="""Target LR at the
         end of optimization. We use a cosine LR schedule with linear warmup.""")
@@ -203,7 +207,7 @@ def train_dino(args,start_epoch):
     )
     #dataset = datasets.ImageFolder(args.data_path, transform=transform)
     print("@@About to test ZipDataset")
-    dataset = ZipDataset(args.data_path, transform=transform)
+    dataset = ZipDataset(args.data_path,'temp_folder', transform=transform)
     sampler = torch.utils.data.DistributedSampler(dataset, shuffle=True)
     data_loader = torch.utils.data.DataLoader(
         dataset,
@@ -362,6 +366,7 @@ def train_dino(args,start_epoch):
     total_time = time.time() - start_time
     total_time_str = str(datetime.timedelta(seconds=int(total_time)))
     print('Training time {}'.format(total_time_str))
+    dataset.cleanup()
 
 
 def train_one_epoch(student, teacher, teacher_without_ddp, dino_loss, data_loader,
